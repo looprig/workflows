@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check vet test race staticcheck gosec govulncheck build tools-ready check
+.PHONY: all fmt fmt-check vet test race integration recovery staticcheck gosec govulncheck build tools-ready check
 
 GO ?= go
 GO_FILES := $(shell GOWORK=off $(GO) list -f '{{range .GoFiles}}{{.Dir}}/{{.}} {{end}}{{range .TestGoFiles}}{{.Dir}}/{{.}} {{end}}{{range .XTestGoFiles}}{{.Dir}}/{{.}} {{end}}' ./... 2>/dev/null)
@@ -24,6 +24,12 @@ test:
 
 race:
 	GOWORK=off $(GO) test -race ./...
+
+integration:
+	GOWORK=off $(GO) test ./... -run 'TestBridgeEndToEnd|TestBridgeRecovery'
+
+recovery:
+	GOWORK=off $(GO) test ./... -run 'TestBridgeRecovery' -count=20
 
 tools-ready:
 	@for tool in staticcheck gosec govulncheck; do \

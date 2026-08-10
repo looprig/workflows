@@ -5,8 +5,28 @@ storage-neutral Flow-to-Harness workflow bridge. Durable storage and concrete
 transport adapters are supplied by callers; this module does not select a
 backend.
 
-The module is intentionally scaffolded here. Workflow definitions and bridge
-implementations are added by later tasks in the Policy53 implementation plan.
+The bridge is storage-neutral. Callers provide the checkpoint adapter and
+session-owned services at composition time:
+
+```go
+checkpoints := flowstore.New(ledger) // storage.Ledger -> flow.CheckpointStore
+registry, _ := workflows.NewRunRegistry(kv)
+inputs, _ := workflows.NewInputStore(blobs)
+supervisor, _ := workflows.NewSupervisor(workflows.SupervisorConfig{
+    SessionID: sessionID, Catalog: catalog, Registry: registry,
+    Inputs: inputs, Leaser: leaser,
+})
+```
+
+The supervisor owns only bounded run metadata, checkpoint coordination, and
+metadata-only workflow activities. Application artifacts, policy text, model
+prompts/output, and report bytes remain in caller-owned stores. Register the
+supervisor as the Harness session resource so session shutdown cancels its
+goroutines and releases its lease.
+
+The `internal/testworkflow` package and bridge integration tests exercise the
+composition with memory providers, including restart/adoption and activity
+reconciliation recovery. They are test fixtures, not a production workflow.
 
 ## Local release provenance
 
