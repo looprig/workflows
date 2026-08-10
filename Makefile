@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check vet test race integration recovery staticcheck gosec govulncheck build tools-ready check
+.PHONY: all fmt fmt-check vet test race integration recovery harness-integration staticcheck gosec govulncheck build tools-ready check
 
 GO ?= go
 GO_FILES := $(shell GOWORK=off $(GO) list -f '{{range .GoFiles}}{{.Dir}}/{{.}} {{end}}{{range .TestGoFiles}}{{.Dir}}/{{.}} {{end}}{{range .XTestGoFiles}}{{.Dir}}/{{.}} {{end}}' ./... 2>/dev/null)
@@ -30,6 +30,11 @@ integration:
 
 recovery:
 	GOWORK=off $(GO) test ./... -run 'TestBridgeRecovery' -count=20
+
+# This proof uses the sibling inference module through the workspace because
+# workflows intentionally does not add that test-only dependency to go.mod.
+harness-integration:
+	$(GO) test ./... -tags harness_integration -run '^TestHarnessSessionWorkflowActivityReplayMatchesAfterRestore$$' -count=1
 
 tools-ready:
 	@for tool in staticcheck gosec govulncheck; do \
