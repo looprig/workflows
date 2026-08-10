@@ -76,9 +76,20 @@ type bridgeFixture struct {
 
 func newBridgeFixture(t *testing.T, gate <-chan struct{}, publisher *bridgePublisher) bridgeFixture {
 	t.Helper()
+	return newBridgeFixtureWithDefinition(t, publisher, func(store flow.CheckpointStore) (*workflows.TypedDefinition[testworkflow.CounterState], error) {
+		return testworkflow.NewDefinitionWithGate(store, gate)
+	})
+}
+
+func newBridgeFixtureWithDefinition(
+	t *testing.T,
+	publisher *bridgePublisher,
+	build func(flow.CheckpointStore) (*workflows.TypedDefinition[testworkflow.CounterState], error),
+) bridgeFixture {
+	t.Helper()
 	backend := memstore.New()
 	store := flow.NewMemStore()
-	def, err := testworkflow.NewDefinitionWithGate(store, gate)
+	def, err := build(store)
 	if err != nil {
 		t.Fatal(err)
 	}
