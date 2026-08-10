@@ -151,6 +151,64 @@ func (s *Supervisor) Activate(ctx context.Context, services tool.SessionResource
 	return nil
 }
 
+// Start schedules one pending run on this session-owned supervisor and returns
+// channels for the durable revision-zero seed acknowledgement and any definite
+// scheduling/start failure. The worker continues through workflow completion;
+// callers only wait on seeded when they need the non-blocking start contract.
+func (s *Supervisor) Start(ctx context.Context, runID uuid.UUID) (<-chan struct{}, <-chan error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	controller, err := s.controller(runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	seeded := make(chan struct{})
+	failed := make(chan error, 1)
+	var seedOnce sync.Once
+	acknowledge := func() { seedOnce.Do(func() { close(seeded) }) }
+	s.workWG.Add(1)
+	go func() {
+		defer s.workWG.Done()
+		select {
+		case s.workers <- struct{}{}:
+			defer func() { <-s.workers }()
+		case <-s.ownerCtx.Done():
+			failed <- errSupervisorOwnershipLost
+			return
+		}
+		runCtx := s.ownerCtx
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		run, getErr := s.registry.Get(runCtx, s.sessionID, runID)
+		if getErr != nil {
+			failed <- getErr
+			return
+		}
+		if run.Status != RunPending {
+			failed <- &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "run is not pending"}
+			return
+		}
+		definition, resolveErr := s.catalog.Resolve(run.DefinitionName, run.DefinitionVersion)
+		if resolveErr != nil {
+			failed <- resolveErr
+			return
+		}
+		startErr := controller.startWithSeed(runCtx, definition, run, acknowledge)
+		if startErr != nil {
+			s.recordError(startErr)
+			failed <- startErr
+			return
+		}
+		select {
+		case <-seeded:
+		default:
+			failed <- errors.New("workflows: durable seed acknowledgement was not observed")
+		}
+	}()
+	return seeded, failed, nil
+}
+
 func (s *Supervisor) loadRuns(ctx context.Context) error {
 	after := ""
 	for {

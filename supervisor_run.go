@@ -65,6 +65,10 @@ func (c *runController) reconcile(ctx context.Context) error {
 }
 
 func (c *runController) start(ctx context.Context, definition Definition, run *Run) error {
+	return c.startWithSeed(ctx, definition, run, nil)
+}
+
+func (c *runController) startWithSeed(ctx context.Context, definition Definition, run *Run, seed func()) error {
 	raw, err := c.supervisor.inputs.Get(ctx, run.SessionID, run.Input)
 	if err != nil {
 		return c.failDefinite(ctx, run, "workflow input unavailable")
@@ -80,7 +84,11 @@ func (c *runController) start(ctx context.Context, definition Definition, run *R
 		}
 		return err
 	}
-	result, err := definition.Start(ctx, input, flow.WithGraphRunID(run.GraphRunID))
+	options := []flow.RunOption{flow.WithGraphRunID(run.GraphRunID)}
+	if seed != nil {
+		options = append(options, flow.WithHooks(flow.Hooks{OnRunStart: func(context.Context, flow.GraphRunState) { seed() }}))
+	}
+	result, err := definition.Start(ctx, input, options...)
 	if err != nil {
 		if ctx.Err() != nil || c.supervisor.ownershipLost() {
 			return nil
