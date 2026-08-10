@@ -54,8 +54,11 @@ func (c *runController) reconcile(ctx context.Context) error {
 		return c.adoptWithHistory(ctx, definition, running, history)
 	case RunRunning, RunInterrupted:
 		return c.adopt(ctx, definition, run)
-	case RunCompleted, RunCancelled, RunFailed:
+	case RunCompleted, RunCancelled:
 		return nil
+	case RunFailed:
+		_, reconcileErr := c.reconcileActivities(ctx, definition, run)
+		return reconcileErr
 	default:
 		return &AdoptionError{RunID: run.ID, Op: "validate status", Err: errors.New("invalid status")}
 	}
@@ -155,6 +158,11 @@ func (c *runController) cancelRun(ctx context.Context, reason string) error {
 		if err := definition.Cancel(ctx, run.GraphRunID, boundSummary(reason)); err != nil {
 			return &AdoptionError{RunID: run.ID, Op: "cancel", Err: err}
 		}
+		reconciled, reconcileErr := c.reconcileActivities(ctx, definition, run)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		run = reconciled
 	}
 	_, err = c.transition(ctx, run, RunCancelled, "workflow cancelled", run.CheckpointRevision)
 	if errors.Is(err, errSupervisorOwnershipLost) {
@@ -173,6 +181,15 @@ func (c *runController) applyResult(ctx context.Context, run *Run, result *Resul
 	if result.Run.GraphRunID != (flow.GraphRunID{}) && result.Run.GraphRunID != run.GraphRunID {
 		return c.failDefinite(ctx, run, "workflow checkpoint identity mismatch")
 	}
+	definition, err := c.supervisor.catalog.Resolve(run.DefinitionName, run.DefinitionVersion)
+	if err != nil {
+		return &AdoptionError{RunID: run.ID, Op: "resolve activity definition", Err: err}
+	}
+	reconciled, err := c.reconcileActivities(ctx, definition, run)
+	if err != nil {
+		return err
+	}
+	run = reconciled
 	var status RunStatus
 	switch result.Run.Status {
 	case flow.RunRunning:
@@ -190,8 +207,15 @@ func (c *runController) applyResult(ctx context.Context, run *Run, result *Resul
 	if summary == "" {
 		summary = "workflow " + string(status)
 	}
-	_, err := c.transition(ctx, run, status, summary, result.Run.Revision)
+	_, err = c.transition(ctx, run, status, summary, result.Run.Revision)
 	return err
+}
+
+func (c *runController) reconcileActivities(ctx context.Context, definition Definition, run *Run) (*Run, error) {
+	if c.supervisor.activity == nil {
+		return run, nil
+	}
+	return reconcileDefinitionActivities(ctx, c.supervisor.registry, c.supervisor.activity, definition, run)
 }
 
 func (c *runController) transition(ctx context.Context, run *Run, status RunStatus, summary string, checkpoint uint64) (*Run, error) {
@@ -214,6 +238,14 @@ func (c *runController) failDefinite(ctx context.Context, run *Run, summary stri
 	if ctx.Err() != nil || c.supervisor.ownershipLost() {
 		return nil
 	}
-	_, err := c.transition(ctx, run, RunFailed, summary, run.CheckpointRevision)
+	failed, err := c.transition(ctx, run, RunFailed, summary, run.CheckpointRevision)
+	if err != nil || c.supervisor.activity == nil {
+		return err
+	}
+	definition, err := c.supervisor.catalog.Resolve(failed.DefinitionName, failed.DefinitionVersion)
+	if err != nil {
+		return &AdoptionError{RunID: failed.ID, Op: "resolve failure activity definition", Err: err}
+	}
+	_, err = reconcileActivityHistory(ctx, c.supervisor.registry, c.supervisor.activity, definition.Metadata(), failed, nil)
 	return err
 }

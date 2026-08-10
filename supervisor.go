@@ -160,7 +160,10 @@ func (s *Supervisor) loadRuns(ctx context.Context) error {
 		}
 		for i := range page.Runs {
 			run := cloneRun(page.Runs[i])
-			if run.Status == RunCompleted || run.Status == RunCancelled || run.Status == RunFailed {
+			// Terminal completed/cancelled runs are never restarted. Failed
+			// runs may still need a bounded run_failed activity reconciliation;
+			// that path does not execute Flow again.
+			if run.Status == RunCompleted || run.Status == RunCancelled {
 				continue
 			}
 			controller := &runController{supervisor: s, id: run.ID}
