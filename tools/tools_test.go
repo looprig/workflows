@@ -67,6 +67,24 @@ func TestDefinitionsBuildDirectSessionBoundBundle(t *testing.T) {
 	}
 }
 
+type controlWithoutStart struct{}
+
+func (controlWithoutStart) Resume(context.Context, uuid.UUID, json.RawMessage) error { return nil }
+func (controlWithoutStart) Cancel(context.Context, uuid.UUID, string) error         { return nil }
+
+func TestNewBundleRejectsSupervisorWithoutSessionOwnedStarter(t *testing.T) {
+	_, err := NewBundle(Config{
+		SessionID:  testID(30),
+		Catalog:    workflows.NewCatalog(),
+		Registry:   registryStub{},
+		Inputs:     inputStoreStub{},
+		Supervisor: controlWithoutStart{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "session-owned start controller") {
+		t.Fatalf("NewBundle error = %v, want fail-closed starter requirement", err)
+	}
+}
+
 func TestRunToolsRejectUnknownFields(t *testing.T) {
 	runtime := &boundRuntime{sessionID: testID(1)}
 	for _, candidate := range newToolSet(runtime) {
@@ -148,7 +166,22 @@ func TestRunStartPersistsCanonicalInputAndReturnsAfterDurableSeed(t *testing.T) 
 	}
 
 	ids := []uuid.UUID{testID(21), testID(22), testID(23)}
-	bundle, err := NewBundle(Config{SessionID: testID(20), Catalog: catalog, Registry: registry, Inputs: inputs, Supervisor: &controlStub{},
+	control := &controlStub{startFunc: func(ctx context.Context, runID uuid.UUID) (<-chan struct{}, <-chan error, error) {
+		current, getErr := registry.Get(ctx, testID(20), runID)
+		if getErr != nil {
+			return nil, nil, getErr
+		}
+		next := *current
+		next.Status = workflows.RunRunning
+		next.StatusSummary = "workflow running"
+		if _, casErr := registry.CompareAndSwap(ctx, current.Revision, next); casErr != nil {
+			return nil, nil, casErr
+		}
+		seeded := make(chan struct{})
+		close(seeded)
+		return seeded, make(chan error, 1), nil
+	}}
+	bundle, err := NewBundle(Config{SessionID: testID(20), Catalog: catalog, Registry: registry, Inputs: inputs, Supervisor: control,
 		Now:   func() time.Time { return time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC) },
 		NewID: func() (uuid.UUID, error) { id := ids[0]; ids = ids[1:]; return id, nil }})
 	if err != nil {

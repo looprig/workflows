@@ -94,6 +94,7 @@ func (inputStoreStub) Put(context.Context, uuid.UUID, []byte) (workflows.InputRe
 type controlStub struct {
 	cancelCalls, resumeCalls int
 	cancelErr, resumeErr     error
+	startFunc                func(context.Context, uuid.UUID) (<-chan struct{}, <-chan error, error)
 }
 
 func (s *controlStub) Cancel(context.Context, uuid.UUID, string) error {
@@ -103,4 +104,17 @@ func (s *controlStub) Cancel(context.Context, uuid.UUID, string) error {
 func (s *controlStub) Resume(context.Context, uuid.UUID, json.RawMessage) error {
 	s.resumeCalls++
 	return s.resumeErr
+}
+
+func (s *controlStub) Start(ctx context.Context, runID uuid.UUID) (<-chan struct{}, <-chan error, error) {
+	if s.startFunc != nil {
+		return s.startFunc(ctx, runID)
+	}
+	seeded := make(chan struct{})
+	close(seeded)
+	return seeded, make(chan error, 1), nil
+}
+
+func (s *controlStub) History(context.Context, uuid.UUID, uint64, uuid.UUID, int) (workflows.ActivityHistoryPage, error) {
+	return workflows.ActivityHistoryPage{}, nil
 }

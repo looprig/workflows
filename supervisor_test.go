@@ -28,11 +28,13 @@ type supervisorTestDefinition struct {
 	startRelease chan struct{}
 	ignoreCancel bool
 	getResult    *Result
+	getResults   []*Result
 	getErr       error
 	startResult  *Result
 	startErr     error
 	resumeResult *Result
 	resumeErr    error
+	cancelErrs   []error
 }
 
 func newSupervisorTestDefinition() *supervisorTestDefinition {
@@ -83,6 +85,11 @@ func (d *supervisorTestDefinition) Get(context.Context, flow.GraphRunID) (*Resul
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.gets++
+	if len(d.getResults) > 0 {
+		result := d.getResults[0]
+		d.getResults = d.getResults[1:]
+		return result, d.getErr
+	}
 	return d.getResult, d.getErr
 }
 func (d *supervisorTestDefinition) History(context.Context, flow.GraphRunID) ([]flow.GraphRunState, error) {
@@ -98,6 +105,11 @@ func (d *supervisorTestDefinition) Cancel(context.Context, flow.GraphRunID, stri
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cancels++
+	if len(d.cancelErrs) > 0 {
+		err := d.cancelErrs[0]
+		d.cancelErrs = d.cancelErrs[1:]
+		return err
+	}
 	return nil
 }
 func (d *supervisorTestDefinition) counts() (int, int, int, int, int) {
@@ -214,6 +226,81 @@ func TestSupervisorActivateAcquiresBeforeStartingPendingExactlyOnce(t *testing.T
 	starts, _, _, _, _ = f.def.counts()
 	if starts != 1 {
 		t.Fatalf("starts after second Activate = %d", starts)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelRecordsIntentAndRetriesFlowRevisionConflicts(t *testing.T) {
+	f := newSupervisorFixture(t)
+	run := f.createRun(t, RunRunning, 101)
+	f.def.getResult = &Result{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 1, Status: flow.RunRunning}}
+	s := f.supervisor(t, f.backend.Leaser)
+	if err := s.Activate(context.Background(), supervisorServices(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.def.cancelErrs = []error{
+		&flow.RevisionConflictError{GraphRunID: run.GraphRunID, Expected: 2, Actual: 1},
+		&flow.RevisionConflictError{GraphRunID: run.GraphRunID, Expected: 3, Actual: 2},
+		&flow.RevisionConflictError{GraphRunID: run.GraphRunID, Expected: 4, Actual: 3},
+	}
+	f.def.getResults = []*Result{
+		{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 2, Status: flow.RunRunning}},
+		{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 3, Status: flow.RunRunning}},
+		{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 4, Status: flow.RunRunning}},
+		{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 5, Status: flow.RunCancelled}},
+	}
+	if err := s.Cancel(context.Background(), run.ID, "operator requested cancellation"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	got, err := f.registry.Get(context.Background(), f.session, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != RunCancelled || got.CheckpointRevision != 5 || !got.CancelRequested {
+		t.Fatalf("cancelled run = %#v, want cancelled at checkpoint 5 with durable intent", got)
+	}
+	_, _, _, _, cancels := f.def.counts()
+	if cancels != 4 {
+		t.Fatalf("Cancel calls = %d, want four attempts", cancels)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelStopsAfterEightRevisionConflicts(t *testing.T) {
+	f := newSupervisorFixture(t)
+	run := f.createRun(t, RunRunning, 102)
+	f.def.getResult = &Result{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 1, Status: flow.RunRunning}}
+	s := f.supervisor(t, f.backend.Leaser)
+	if err := s.Activate(context.Background(), supervisorServices(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < maxCancelAttempts; attempt++ {
+		f.def.cancelErrs = append(f.def.cancelErrs, &flow.RevisionConflictError{GraphRunID: run.GraphRunID, Expected: uint64(attempt + 2), Actual: uint64(attempt + 1)})
+		f.def.getResults = append(f.def.getResults, &Result{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: uint64(attempt + 2), Status: flow.RunRunning}})
+	}
+	if err := s.Cancel(context.Background(), run.ID, "retry exhaustion"); err == nil {
+		t.Fatal("Cancel error = nil, want bounded conflict failure")
+	}
+	got, err := f.registry.Get(context.Background(), f.session, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != RunRunning || !got.CancelRequested {
+		t.Fatalf("run after exhausted cancel = %#v, want running with durable intent", got)
+	}
+	_, _, _, _, cancels := f.def.counts()
+	if cancels != maxCancelAttempts {
+		t.Fatalf("Cancel calls = %d, want %d", cancels, maxCancelAttempts)
 	}
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)

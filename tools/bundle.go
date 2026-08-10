@@ -36,6 +36,10 @@ type supervisorStarter interface {
 	Start(context.Context, uuid.UUID) (<-chan struct{}, <-chan error, error)
 }
 
+type supervisorHistory interface {
+	History(context.Context, uuid.UUID, uint64, uuid.UUID, int) (workflows.ActivityHistoryPage, error)
+}
+
 type Config struct {
 	SessionID  uuid.UUID
 	Catalog    *workflows.Catalog
@@ -59,6 +63,12 @@ type boundRuntime struct {
 func NewBundle(config Config) ([]tool.InvokableTool, error) {
 	if config.SessionID.IsZero() || config.Catalog == nil || config.Registry == nil || config.Inputs == nil || config.Supervisor == nil {
 		return nil, errors.New("workflow tools: session, catalog, registry, input store, and supervisor are required")
+	}
+	if _, ok := config.Supervisor.(supervisorStarter); !ok {
+		return nil, errors.New("workflow tools: supervisor must provide the session-owned start controller")
+	}
+	if _, ok := config.Supervisor.(supervisorHistory); !ok {
+		return nil, errors.New("workflow tools: supervisor must provide the projected history controller")
 	}
 	now := config.Now
 	if now == nil {

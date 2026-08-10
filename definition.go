@@ -20,14 +20,34 @@ const (
 
 var definitionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
 
-type VertexMetadata struct{ label string }
+type VertexMetadata struct {
+	id    flow.VertexID
+	label string
+}
 
 func NewVertexMetadata(label string) VertexMetadata { return VertexMetadata{label: label} }
-func (m VertexMetadata) Label() string              { return m.label }
+
+// NewVertexMetadataForID binds a safe display label to Flow's stable vertex
+// identity. Definitions that provide IDs let activity projection remain
+// correct when the graph completes vertices out of declaration order.
+func NewVertexMetadataForID(id flow.VertexID, label string) VertexMetadata {
+	return VertexMetadata{id: id, label: label}
+}
+
+func (m VertexMetadata) ID() flow.VertexID { return m.id }
+func (m VertexMetadata) Label() string     { return m.label }
 func (m VertexMetadata) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
+		ID    string `json:"id,omitempty"`
 		Label string `json:"label"`
-	}{Label: m.label})
+	}{ID: vertexMetadataID(m.id), Label: m.label})
+}
+
+func vertexMetadataID(id flow.VertexID) string {
+	if id == (flow.VertexID{}) {
+		return ""
+	}
+	return id.String()
 }
 
 type Metadata struct {
@@ -49,9 +69,16 @@ func NewMetadata(name, version, description string, inputSchema, resumeSchema js
 	if len(description) > maxDescriptionBytes || !utf8.ValidString(description) {
 		return Metadata{}, &InvalidSchemaError{Field: "description", Err: errors.New("must be valid UTF-8 within the size limit")}
 	}
+	seenVertexIDs := make(map[flow.VertexID]struct{}, len(vertices))
 	for _, vertex := range vertices {
 		if vertex.label == "" || len(vertex.label) > 64 || !utf8.ValidString(vertex.label) || strings.ContainsAny(vertex.label, "\x00\r\n") {
 			return Metadata{}, &InvalidSchemaError{Field: "vertex label", Err: errors.New("must be safe non-empty text within 64 bytes")}
+		}
+		if vertex.id != (flow.VertexID{}) {
+			if _, exists := seenVertexIDs[vertex.id]; exists {
+				return Metadata{}, &InvalidSchemaError{Field: "vertex ID", Err: errors.New("must be unique")}
+			}
+			seenVertexIDs[vertex.id] = struct{}{}
 		}
 	}
 	return Metadata{

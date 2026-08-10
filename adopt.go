@@ -23,6 +23,18 @@ func (c *runController) adoptWithHistory(ctx context.Context, definition Definit
 	if err != nil {
 		return c.handleCheckpointReadError(ctx, run, "reconstruct checkpoint", err)
 	}
+	if run.Status == RunRunning && result.Run.Status == flow.RunRunning {
+		if adopter, ok := definition.(interface {
+			Adopt(context.Context, flow.GraphRunID, ...flow.RunOption) (*Result, error)
+		}); ok {
+			executionCtx, finishExecution := c.beginExecution(ctx)
+			result, err = adopter.Adopt(executionCtx, run.GraphRunID)
+			finishExecution()
+			if err != nil {
+				return c.handleCheckpointReadError(ctx, run, "adopt running checkpoint", err)
+			}
+		}
+	}
 	return c.applyResult(ctx, run, result)
 }
 

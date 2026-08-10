@@ -11,6 +11,22 @@ import (
 	"github.com/looprig/flow/pkg/flow"
 )
 
+type adoptingTestDefinition struct {
+	*supervisorTestDefinition
+	adoptResult *Result
+	adoptErr    error
+	adopts      int
+}
+
+func (d *adoptingTestDefinition) registeredCopy() (Definition, error) { return d, nil }
+
+func (d *adoptingTestDefinition) Adopt(context.Context, flow.GraphRunID, ...flow.RunOption) (*Result, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.adopts++
+	return d.adoptResult, d.adoptErr
+}
+
 func TestAdoptRunningReconstructsHistoryWithoutUserResume(t *testing.T) {
 	f := newSupervisorFixture(t)
 	run := f.createRun(t, RunRunning, 94)
@@ -25,6 +41,41 @@ func TestAdoptRunningReconstructsHistoryWithoutUserResume(t *testing.T) {
 	_, gets, histories, resumes, _ := f.def.counts()
 	if gets != 1 || histories != 1 || resumes != 0 {
 		t.Fatalf("gets=%d histories=%d resumes=%d, want 1,1,0", gets, histories, resumes)
+	}
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdoptRunningContinuesThroughDefinitionAdoptionAPI(t *testing.T) {
+	f := newSupervisorFixture(t)
+	definition := &adoptingTestDefinition{supervisorTestDefinition: f.def}
+	f.catalog = NewCatalog()
+	if err := f.catalog.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	run := f.createRun(t, RunRunning, 104)
+	f.def.getResult = &Result{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 4, Status: flow.RunRunning}}
+	definition.adoptResult = &Result{Run: flow.GraphRunState{GraphRunID: run.GraphRunID, Revision: 5, Status: flow.RunCompleted}}
+	s := f.supervisor(t, f.backend.Leaser)
+	if err := s.Activate(context.Background(), supervisorServices(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	definition.mu.Lock()
+	adopts := definition.adopts
+	definition.mu.Unlock()
+	if adopts != 1 {
+		t.Fatalf("adoption API calls = %d, want one", adopts)
+	}
+	got, err := f.registry.Get(context.Background(), f.session, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != RunCompleted || got.CheckpointRevision != 5 {
+		t.Fatalf("adopted run = %#v, want completed at checkpoint 5", got)
 	}
 	if err := s.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)

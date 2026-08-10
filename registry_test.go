@@ -153,6 +153,67 @@ func TestRunRegistryCreateIsAbsentOnlyAndCASRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestRunRegistryCompareAndSwapRejectsDecreasingProgress(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Run)
+		field  string
+	}{
+		{
+			name: "checkpoint revision",
+			mutate: func(run *Run) {
+				run.CheckpointRevision--
+			},
+			field: "checkpoint revision",
+		},
+		{
+			name: "activity cursor",
+			mutate: func(run *Run) {
+				run.ActivityCursor--
+			},
+			field: "activity cursor",
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			backend := memstore.New()
+			registry, err := NewRunRegistry(backend.KV)
+			if err != nil {
+				t.Fatalf("NewRunRegistry: %v", err)
+			}
+			run := testRun(testUUID(byte(50+i)), testUUID(byte(60+i)))
+			run.CheckpointRevision = 4
+			run.ActivityCursor = 3
+			created, err := registry.Create(ctx, run)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			next := *created
+			next.UpdatedAt = next.UpdatedAt.Add(time.Second)
+			tc.mutate(&next)
+			_, err = registry.CompareAndSwap(ctx, created.Revision, next)
+			var conflict *ConflictError
+			if !errors.Is(err, ErrConflict) || !errors.As(err, &conflict) {
+				t.Fatalf("CompareAndSwap error = %v, want typed conflict", err)
+			}
+			if !strings.Contains(conflict.Reason, tc.field) {
+				t.Fatalf("conflict reason = %q, want %q", conflict.Reason, tc.field)
+			}
+
+			stored, err := registry.Get(ctx, run.SessionID, run.ID)
+			if err != nil {
+				t.Fatalf("Get after rejected update: %v", err)
+			}
+			if stored.CheckpointRevision != created.CheckpointRevision || stored.ActivityCursor != created.ActivityCursor {
+				t.Fatalf("stored progress changed after rejection: checkpoint=%d cursor=%d", stored.CheckpointRevision, stored.ActivityCursor)
+			}
+		})
+	}
+}
+
 func TestRunRegistryEnforcesStatusTransitionsAndImmutableIdentity(t *testing.T) {
 	legal := map[RunStatus][]RunStatus{
 		RunPending:     {RunPending, RunRunning, RunCancelled, RunFailed},

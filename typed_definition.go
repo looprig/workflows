@@ -146,6 +146,19 @@ func (d *TypedDefinition[S]) Resume(ctx context.Context, id flow.GraphRunID, res
 	return d.result(result)
 }
 
+// Adopt continues a durable running Flow checkpoint after a supervisor
+// restart. It is intentionally separate from Resume: adoption carries no
+// user payload and is only selected after the supervisor observes a running,
+// nonterminal checkpoint. Interrupted checkpoints still require ValidateResume
+// and an explicit user action.
+func (d *TypedDefinition[S]) Adopt(ctx context.Context, id flow.GraphRunID, opts ...flow.RunOption) (*Result, error) {
+	result, err := d.runner.Resume(ctx, id, nil, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return d.result(result)
+}
+
 func (d *TypedDefinition[S]) Get(ctx context.Context, id flow.GraphRunID) (*Result, error) {
 	result, err := d.runner.Get(ctx, id)
 	if err != nil {

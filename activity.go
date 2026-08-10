@@ -96,6 +96,14 @@ func projectActivityHistory(run *Run, metadata Metadata, history []*flow.Checkpo
 	if len(labels) > maxActivityProgress {
 		return nil, activityValidation("definition vertices", "exceed progress limit")
 	}
+	labelsByVertexID := make(map[flow.VertexID]string, len(labels))
+	identityLabels := false
+	for _, vertex := range labels {
+		if vertex.ID() != (flow.VertexID{}) {
+			identityLabels = true
+			labelsByVertexID[vertex.ID()] = boundActivityText(vertex.Label(), maxActivityVertexLabelBytes)
+		}
+	}
 	var total uint32
 	for range labels {
 		total++
@@ -159,7 +167,12 @@ func projectActivityHistory(run *Run, metadata Metadata, history []*flow.Checkpo
 			ordinal := vertexOrdinals[vertex.VertexID]
 			vertexOrdinals[vertex.VertexID] = ordinal + 1
 			label := ""
-			if int(completed) < len(labels) {
+			if identityLabels {
+				label = labelsByVertexID[vertex.VertexID]
+			} else if int(completed) < len(labels) {
+				// Legacy definitions without stable IDs retain declaration-order
+				// labels. New definitions should use NewVertexMetadataForID so
+				// parallel/out-of-order completion cannot mislabel activity.
 				label = boundActivityText(labels[completed].Label(), maxActivityVertexLabelBytes)
 			}
 			completed++

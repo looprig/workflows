@@ -97,6 +97,7 @@ type Run struct {
 	Input              InputReference      `json:"input"`
 	Status             RunStatus           `json:"status"`
 	StatusSummary      string              `json:"status_summary,omitempty"`
+	CancelRequested    bool                `json:"cancel_requested,omitempty"`
 	CheckpointRevision uint64              `json:"checkpoint_revision"`
 	ActivityCursor     uint64              `json:"activity_cursor"`
 	LedgerLocator      string              `json:"ledger_locator"`

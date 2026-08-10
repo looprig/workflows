@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/flow/pkg/flow"
@@ -38,8 +37,7 @@ func (t *runStartTool) InvokableRun(ctx context.Context, raw string) (*tool.Tool
 	if err != nil {
 		return nil, err
 	}
-	validated, err := definition.ValidateInput(canonical)
-	if err != nil {
+	if _, err := definition.ValidateInput(canonical); err != nil {
 		return nil, err
 	}
 	var parent uuid.UUID
@@ -76,27 +74,14 @@ func (t *runStartTool) InvokableRun(ctx context.Context, raw string) (*tool.Tool
 	if err != nil {
 		return nil, err
 	}
-	if starter, ok := t.supervisor.(supervisorStarter); ok {
-		seeded, failed, startErr := starter.Start(ctx, created.ID)
-		if startErr != nil {
-			return nil, startErr
-		}
-		select {
-		case <-seeded:
-			current, getErr := t.registry.Get(ctx, t.sessionID, runID)
-			if getErr != nil {
-				return nil, getErr
-			}
-			return result(newRunResult(*current))
-		case startErr := <-failed:
-			return nil, startErr
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	starter := t.supervisor.(supervisorStarter)
+	seeded, failed, startErr := starter.Start(ctx, created.ID)
+	if startErr != nil {
+		return nil, startErr
 	}
-	seeded := make(chan struct{}, 1)
-	failed := make(chan error, 1)
-	go t.run(ctx, created, definition, validated, seeded, failed)
+	if seeded == nil || failed == nil {
+		return nil, errors.New("workflow tools: session-owned start controller returned invalid result channels")
+	}
 	select {
 	case <-seeded:
 		current, getErr := t.registry.Get(ctx, t.sessionID, runID)
@@ -109,62 +94,4 @@ func (t *runStartTool) InvokableRun(ctx context.Context, raw string) (*tool.Tool
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-func (t *runStartTool) run(parent context.Context, run *workflows.Run, definition workflows.Definition, validated workflows.ValidatedInput, seeded chan<- struct{}, failed chan<- error) {
-	ctx := context.WithoutCancel(parent)
-	running := *run
-	running.Status = workflows.RunRunning
-	running.StatusSummary = "workflow starting"
-	running.UpdatedAt = t.now().UTC()
-	current, err := t.registry.CompareAndSwap(ctx, run.Revision, running)
-	if err != nil {
-		failed <- err
-		return
-	}
-	hooks := flow.Hooks{OnRunStart: func(context.Context, flow.GraphRunState) {
-		select {
-		case seeded <- struct{}{}:
-		default:
-		}
-	}}
-	outcome, err := definition.Start(ctx, validated, flow.WithGraphRunID(run.GraphRunID), flow.WithHooks(hooks))
-	if err != nil {
-		t.failStart(ctx, current, "workflow seed failed")
-		select {
-		case failed <- fmt.Errorf("workflow tools: start failed: %w", err):
-		default:
-		}
-		return
-	}
-	latest, getErr := t.registry.Get(ctx, t.sessionID, run.ID)
-	if getErr != nil {
-		return
-	}
-	next := *latest
-	next.CheckpointRevision = outcome.Run.Revision
-	next.StatusSummary = outcome.Summary
-	next.UpdatedAt = t.now().UTC()
-	switch outcome.Run.Status {
-	case flow.RunInterrupted:
-		next.Status = workflows.RunInterrupted
-	case flow.RunCompleted:
-		next.Status = workflows.RunCompleted
-	case flow.RunCancelled:
-		next.Status = workflows.RunCancelled
-	default:
-		next.Status = workflows.RunRunning
-	}
-	_, _ = t.registry.CompareAndSwap(ctx, latest.Revision, next)
-}
-
-func (t *runStartTool) failStart(ctx context.Context, run *workflows.Run, summary string) {
-	if run == nil {
-		return
-	}
-	next := *run
-	next.Status = workflows.RunFailed
-	next.StatusSummary = summary
-	next.UpdatedAt = t.now().UTC()
-	_, _ = t.registry.CompareAndSwap(ctx, run.Revision, next)
 }

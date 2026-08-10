@@ -97,6 +97,12 @@ func (r *RunRegistry) CompareAndSwap(ctx context.Context, expectedRevision uint6
 	if !validRunTransition(current.Status, next.Status) {
 		return nil, &ConflictError{SessionID: next.SessionID, RunID: next.ID, Expected: expectedRevision, Actual: current.Revision, Reason: fmt.Sprintf("illegal status transition %s -> %s", current.Status, next.Status)}
 	}
+	if next.CheckpointRevision < current.CheckpointRevision {
+		return nil, &ConflictError{SessionID: next.SessionID, RunID: next.ID, Expected: expectedRevision, Actual: current.Revision, Reason: "checkpoint revision moved backwards"}
+	}
+	if next.ActivityCursor < current.ActivityCursor {
+		return nil, &ConflictError{SessionID: next.SessionID, RunID: next.ID, Expected: expectedRevision, Actual: current.Revision, Reason: "activity cursor moved backwards"}
+	}
 	if next.UpdatedAt.Before(current.UpdatedAt) {
 		return nil, &ConflictError{SessionID: next.SessionID, RunID: next.ID, Expected: expectedRevision, Actual: current.Revision, Reason: "updated_at moved backwards"}
 	}

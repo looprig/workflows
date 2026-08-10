@@ -6,15 +6,42 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/flow/pkg/flow"
 )
 
+const maxCancelAttempts = 8
+
 type runController struct {
 	supervisor *Supervisor
 	id         uuid.UUID
 	mu         sync.Mutex
+	execution  atomic.Pointer[runExecution]
+}
+
+type runExecution struct {
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func (e *runExecution) stop() { e.once.Do(e.cancel) }
+
+func (c *runController) beginExecution(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	execution := &runExecution{cancel: cancel}
+	c.execution.Store(execution)
+	return ctx, func() {
+		c.execution.CompareAndSwap(execution, nil)
+		cancel()
+	}
+}
+
+func (c *runController) signalExecutionCancel() {
+	if execution := c.execution.Load(); execution != nil {
+		execution.stop()
+	}
 }
 
 func (c *runController) reconcile(ctx context.Context) error {
@@ -27,6 +54,9 @@ func (c *runController) reconcile(ctx context.Context) error {
 	definition, err := c.supervisor.catalog.Resolve(run.DefinitionName, run.DefinitionVersion)
 	if err != nil {
 		return &AdoptionError{RunID: run.ID, Op: "resolve definition", Err: err}
+	}
+	if run.CancelRequested && run.Status != RunFailed && run.Status != RunCompleted && run.Status != RunCancelled {
+		return c.cancelLocked(ctx, run, "cancel requested")
 	}
 	switch run.Status {
 	case RunPending:
@@ -88,7 +118,9 @@ func (c *runController) startWithSeed(ctx context.Context, definition Definition
 	if seed != nil {
 		options = append(options, flow.WithHooks(flow.Hooks{OnRunStart: func(context.Context, flow.GraphRunState) { seed() }}))
 	}
-	result, err := definition.Start(ctx, input, options...)
+	executionCtx, finishExecution := c.beginExecution(ctx)
+	defer finishExecution()
+	result, err := definition.Start(executionCtx, input, options...)
 	if err != nil {
 		if ctx.Err() != nil || c.supervisor.ownershipLost() {
 			return nil
@@ -129,7 +161,9 @@ func (c *runController) resume(ctx context.Context, payload json.RawMessage) err
 		}
 		return err
 	}
-	result, err := definition.Resume(ctx, run.GraphRunID, validated)
+	executionCtx, finishExecution := c.beginExecution(ctx)
+	defer finishExecution()
+	result, err := definition.Resume(executionCtx, run.GraphRunID, validated)
 	if err != nil {
 		if ctx.Err() != nil || c.supervisor.ownershipLost() {
 			return nil
@@ -143,6 +177,10 @@ func (c *runController) resume(ctx context.Context, payload json.RawMessage) err
 }
 
 func (c *runController) cancelRun(ctx context.Context, reason string) error {
+	// Signal an in-flight Flow execution before waiting for the controller lock;
+	// otherwise a long-running vertex could prevent the durable cancel intent
+	// from ever reaching Runner.Cancel.
+	c.signalExecutionCancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	opCtx, cancel, err := c.supervisor.operationContext(ctx)
@@ -150,33 +188,122 @@ func (c *runController) cancelRun(ctx context.Context, reason string) error {
 		return err
 	}
 	defer cancel()
-	ctx = opCtx
-	run, err := c.supervisor.registry.Get(ctx, c.supervisor.sessionID, c.id)
+	return c.cancelLocked(opCtx, nil, reason)
+}
+
+// cancelLocked records intent before touching Flow, then reconciles the
+// resulting checkpoint back into the registry. The intent makes a cancellation
+// recoverable if the owner exits between the registry write and Runner.Cancel.
+func (c *runController) cancelLocked(ctx context.Context, requested *Run, reason string) error {
+	if requested == nil {
+		var err error
+		requested, err = c.supervisor.registry.Get(ctx, c.supervisor.sessionID, c.id)
+		if err != nil {
+			return err
+		}
+	}
+	run := requested
+	if run.Status == RunCancelled {
+		return nil
+	}
+	if run.Status == RunCompleted || run.Status == RunFailed {
+		return &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "run is terminal"}
+	}
+	if !run.CancelRequested {
+		next := cloneRun(*run)
+		next.CancelRequested = true
+		next.StatusSummary = "workflow cancellation requested"
+		next.UpdatedAt = c.supervisor.now().UTC()
+		updated, err := c.supervisor.registry.CompareAndSwap(ctx, run.Revision, next)
+		if err != nil {
+			return fmt.Errorf("workflows: persist cancellation intent: %w", err)
+		}
+		run = updated
+	}
+	if run.Status == RunPending {
+		_, err := c.transition(ctx, run, RunCancelled, "workflow cancelled", run.CheckpointRevision)
+		if errors.Is(err, errSupervisorOwnershipLost) {
+			return nil
+		}
+		return err
+	}
+
+	definition, err := c.supervisor.catalog.Resolve(run.DefinitionName, run.DefinitionVersion)
 	if err != nil {
 		return err
 	}
-	if run.Status == RunCompleted || run.Status == RunCancelled || run.Status == RunFailed {
-		return &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "run is terminal"}
+	boundedReason := boundSummary(reason)
+	if boundedReason == "" {
+		boundedReason = "cancel requested"
 	}
-	if run.Status != RunPending {
-		definition, resolveErr := c.supervisor.catalog.Resolve(run.DefinitionName, run.DefinitionVersion)
-		if resolveErr != nil {
-			return resolveErr
+	for attempt := 0; attempt < maxCancelAttempts; attempt++ {
+		if ctx.Err() != nil || c.supervisor.ownershipLost() {
+			return nil
 		}
-		if err := definition.Cancel(ctx, run.GraphRunID, boundSummary(reason)); err != nil {
-			return &AdoptionError{RunID: run.ID, Op: "cancel", Err: err}
+		cancelErr := definition.Cancel(ctx, run.GraphRunID, boundedReason)
+		if cancelErr == nil {
+			result, getErr := definition.Get(ctx, run.GraphRunID)
+			if getErr != nil {
+				return c.handleCheckpointReadError(ctx, run, "read cancelled checkpoint", getErr)
+			}
+			if result == nil {
+				return &AdoptionError{RunID: run.ID, Op: "read cancelled checkpoint", Err: errors.New("nil checkpoint result")}
+			}
+			if result.Run.Status == flow.RunCompleted {
+				if applyErr := c.applyResult(ctx, run, result); applyErr != nil {
+					return applyErr
+				}
+				return &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "workflow completed before cancellation"}
+			}
+			return c.applyResult(ctx, run, result)
 		}
-		reconciled, reconcileErr := c.reconcileActivities(ctx, definition, run)
-		if reconcileErr != nil {
-			return reconcileErr
+
+		var conflict *flow.RevisionConflictError
+		if !errors.As(cancelErr, &conflict) {
+			// Cancel may lose a race with a terminal append. Re-read the
+			// checkpoint before deciding whether this is idempotent success or
+			// a different terminal outcome.
+			result, getErr := definition.Get(ctx, run.GraphRunID)
+			if getErr != nil {
+				return &AdoptionError{RunID: run.ID, Op: "cancel", Err: cancelErr}
+			}
+			if result == nil {
+				return &AdoptionError{RunID: run.ID, Op: "cancel", Err: errors.New("nil checkpoint result")}
+			}
+			if result.Run.Status == flow.RunCancelled {
+				return c.applyResult(ctx, run, result)
+			}
+			if result.Run.Status == flow.RunCompleted {
+				if applyErr := c.applyResult(ctx, run, result); applyErr != nil {
+					return applyErr
+				}
+				return &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "workflow completed before cancellation"}
+			}
+			return &AdoptionError{RunID: run.ID, Op: "cancel", Err: cancelErr}
 		}
-		run = reconciled
+
+		latest, getErr := definition.Get(ctx, run.GraphRunID)
+		if getErr != nil {
+			return c.handleCheckpointReadError(ctx, run, "reread cancellation conflict", getErr)
+		}
+		if latest == nil {
+			return &AdoptionError{RunID: run.ID, Op: "reread cancellation conflict", Err: errors.New("nil checkpoint result")}
+		}
+		switch latest.Run.Status {
+		case flow.RunCancelled:
+			return c.applyResult(ctx, run, latest)
+		case flow.RunCompleted:
+			if applyErr := c.applyResult(ctx, run, latest); applyErr != nil {
+				return applyErr
+			}
+			return &ConflictError{SessionID: run.SessionID, RunID: run.ID, Expected: run.Revision, Actual: run.Revision, Reason: "workflow completed before cancellation"}
+		default:
+			// Keep the durable intent and update only the in-memory checkpoint
+			// reference; Flow owns the authoritative revision for the retry.
+			run.CheckpointRevision = latest.Run.Revision
+		}
 	}
-	_, err = c.transition(ctx, run, RunCancelled, "workflow cancelled", run.CheckpointRevision)
-	if errors.Is(err, errSupervisorOwnershipLost) {
-		return nil
-	}
-	return err
+	return &AdoptionError{RunID: run.ID, Op: "cancel", Err: fmt.Errorf("revision conflict retry limit %d reached", maxCancelAttempts)}
 }
 
 func (c *runController) applyResult(ctx context.Context, run *Run, result *Result) error {

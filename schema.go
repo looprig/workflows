@@ -34,6 +34,9 @@ func compileStrictSchema(field string, raw json.RawMessage) (*compiledSchema, er
 	if additional, ok := root["additionalProperties"]; !ok || additional != false {
 		return nil, &InvalidSchemaError{Field: field, Err: errors.New("root schema must set additionalProperties to false")}
 	}
+	if err := requireClosedObjectSchemas(document); err != nil {
+		return nil, &InvalidSchemaError{Field: field, Err: err}
+	}
 	if err := rejectExternalReferences(document); err != nil {
 		return nil, &InvalidSchemaError{Field: field, Err: err}
 	}
@@ -59,6 +62,79 @@ func (s *compiledSchema) validate(raw json.RawMessage) error {
 		return errors.New("document must be a JSON object")
 	}
 	return s.schema.Validate(document)
+}
+
+func requireClosedObjectSchemas(value any) error {
+	schema, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if isObjectSchema(schema) {
+		if additional, ok := schema["additionalProperties"]; !ok || additional != false {
+			return errors.New("every object schema must set additionalProperties to false")
+		}
+	}
+	for _, keyword := range []string{
+		"additionalProperties", "additionalItems", "contains", "contentSchema",
+		"else", "if", "items", "not", "propertyNames", "then",
+		"unevaluatedItems", "unevaluatedProperties",
+	} {
+		if child, exists := schema[keyword]; exists {
+			if err := requireClosedObjectSchemas(child); err != nil {
+				return err
+			}
+		}
+	}
+	for _, keyword := range []string{"allOf", "anyOf", "oneOf", "prefixItems"} {
+		children, _ := schema[keyword].([]any)
+		for _, child := range children {
+			if err := requireClosedObjectSchemas(child); err != nil {
+				return err
+			}
+		}
+	}
+	for _, keyword := range []string{"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"} {
+		children, _ := schema[keyword].(map[string]any)
+		for _, child := range children {
+			if err := requireClosedObjectSchemas(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isObjectSchema(schema map[string]any) bool {
+	if schemaTypeIncludesObject(schema["type"]) {
+		return true
+	}
+	// JSON Schema permits object applicators without an explicit type. Treat
+	// those as object schemas too; otherwise a nested `properties` block could
+	// silently reopen unknown fields through the type system's implicit object.
+	for _, keyword := range []string{
+		"properties", "patternProperties", "additionalProperties", "required",
+		"dependentRequired", "dependentSchemas", "minProperties", "maxProperties",
+		"unevaluatedProperties",
+	} {
+		if _, ok := schema[keyword]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaTypeIncludesObject(value any) bool {
+	switch value := value.(type) {
+	case string:
+		return value == "object"
+	case []any:
+		for _, candidate := range value {
+			if candidate == "object" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func decodeBoundedJSON(raw []byte, maxBytes, maxDepth, maxProperties int) (any, error) {

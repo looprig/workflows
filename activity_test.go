@@ -124,6 +124,34 @@ func TestActivityProjectionEmitsOneTerminalForEachOutcome(t *testing.T) {
 	}
 }
 
+func TestActivityProjectionLabelsVerticesByStableIdentity(t *testing.T) {
+	run, _, history := activityProjectionFixture(t)
+	vertexA := history[1].Vertices[0].VertexID
+	vertexB := history[2].Vertices[0].VertexID
+	history[1].Vertices[0].VertexID, history[2].Vertices[0].VertexID = vertexB, vertexA
+	metadata, err := NewMetadata(
+		"source_document_extract", "v1", "safe description",
+		json.RawMessage(`{"type":"object","additionalProperties":false}`), nil,
+		[]VertexMetadata{NewVertexMetadataForID(vertexA, "label A"), NewVertexMetadataForID(vertexB, "label B")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activities, err := projectActivities(run, metadata, history)
+	if err != nil {
+		t.Fatalf("projectActivities: %v", err)
+	}
+	labels := make(map[uuid.UUID]string)
+	for _, activity := range activities {
+		if activity.Kind == string(activityVertexCompleted) {
+			labels[activity.VertexID] = activity.VertexLabel
+		}
+	}
+	if labels[uuid.UUID(vertexA)] != "label A" || labels[uuid.UUID(vertexB)] != "label B" {
+		t.Fatalf("vertex labels = %#v, want identity-bound labels", labels)
+	}
+}
+
 func TestActivityTimeNormalizesFlowLocalTimestamps(t *testing.T) {
 	local := time.Date(2026, 8, 10, 11, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
 	got, err := activityTime(local)
