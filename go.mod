@@ -9,7 +9,9 @@ tool (
 )
 
 require (
+	github.com/looprig/core v0.5.0
 	github.com/looprig/flow v0.0.0
+	github.com/looprig/storage v0.0.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
 
@@ -34,7 +36,6 @@ require (
 	github.com/gookit/color v1.6.1 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
-	github.com/looprig/core v0.5.0 // indirect
 	github.com/openai/openai-go/v3 v3.50.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/securego/gosec/v2 v2.28.0 // indirect
