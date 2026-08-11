@@ -1,0 +1,28 @@
+name: Documentation examples
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-examples:
+    runs-on: ubuntu-latest
+    env:
+      GOCACHE: /tmp/looprig-workflows-docs-gocache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Hydrate the pinned module cache
+        run: GOWORK=off go mod download
+      - name: Run stage 18
+        run: GOWORK=off GOCACHE=/tmp/looprig-workflows-docs-gocache go run ./examples/docs/stage18_workflows
+      - name: Workflows standalone checks (partial)
+        run: GOWORK=off make standalone-check
+      - name: Run standalone race suite
+        run: GOWORK=off go test -race ./...

@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "repository": "workflows",
+  "proofSources": [
+    {
+      "id": "example-workflows-stage18-lifecycle-fixture",
+      "type": "executable-fixture",
+      "path": "examples/docs/stage18_workflows/main.go",
+      "symbol": "main"
+    },
+    {
+      "id": "example-workflows-stage18-output-test",
+      "type": "test",
+      "path": "examples/docs/stage18_workflows/main_test.go",
+      "symbol": "TestStage18Output"
+    },
+    {
+      "id": "example-workflows-artifacts-contract-test",
+      "type": "test",
+      "path": "examples/docs_contract_test.go",
+      "symbol": "TestDocumentationExampleArtifacts"
+    },
+    {
+      "id": "example-workflows-typed-definition-source",
+      "type": "source",
+      "path": "typed_definition.go",
+      "symbol": "TypedDefinition"
+    },
+    {
+      "id": "example-workflows-catalog-source",
+      "type": "source",
+      "path": "catalog.go",
+      "symbol": "Catalog"
+    },
+    {
+      "id": "example-workflows-recovery-test",
+      "type": "test",
+      "path": "recovery_integration_test.go",
+      "symbol": "TestBridgeRecoveryAfterInterruptionBeforeResume"
+    }
+  ],
+  "examples": [
+    {
+      "id": "example-workflows-stage18-workflow-lifecycle",
+      "ecosystem": "go",
+      "owner": "workflows",
+      "sourcePath": "examples/docs/stage18_workflows/main.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/workflows": "source-workspace",
+        "github.com/looprig/flow": "source-workspace",
+        "github.com/looprig/storage": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off GOCACHE=/tmp/looprig-workflows-docs-gocache go run ./examples/docs/stage18_workflows",
+      "assertion": "The deterministic output proves typed validation, start and interruption, recovery from append-only checkpoint state, typed resume to completion, and terminal cancellation.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "No cleanup required; both runs use a process-local checkpoint store and fixed identifiers.",
+      "liveGate": null,
+      "proofIds": [
+        "example-workflows-stage18-lifecycle-fixture",
+        "example-workflows-stage18-output-test",
+        "example-workflows-artifacts-contract-test",
+        "example-workflows-typed-definition-source",
+        "example-workflows-catalog-source",
+        "example-workflows-recovery-test"
+      ]
+    }
+  ]
+}

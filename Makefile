@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check vet test race integration recovery harness-integration harness-integration-race harness-gates-test release-checkpoint staticcheck gosec govulncheck build tools-ready vuln-db-ready dependency-check dependency-policy dependency-policy-test repository-provenance-test notices-check provenance check
+.PHONY: all fmt fmt-check vet test race integration recovery harness-integration harness-integration-race harness-gates-test release-checkpoint standalone-check staticcheck gosec govulncheck build tools-ready vuln-db-ready dependency-check dependency-policy dependency-policy-test repository-provenance-test notices-check provenance check
 
 GO ?= go
 GO_ENV := GOWORK=off GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly
@@ -205,6 +205,14 @@ provenance:
 # integration and fault test in both ordinary and race modes.
 release-checkpoint:
 	./scripts/release-checkpoint.sh
+
+# standalone-check contains only gates that a clean checkout can satisfy after
+# hydrating the pinned Go module cache. Release-only vulnerability, license
+# scanner, and provenance receipt inputs remain on their dedicated targets.
+# The tagged Harness integration suites also remain separate until go.mod pins
+# a compatible published Harness. harness-gates-test checks only their static
+# argument definitions; it does not execute those tagged suites.
+standalone-check: fmt-check vet test race integration tools-ready staticcheck gosec build dependency-check dependency-policy-test repository-provenance-test harness-gates-test notices-check
 
 # check is deliberately non-mutating and keeps every required local gate
 # explicit. Network-backed vulnerability lookup is never an implicit fallback.
