@@ -12,11 +12,13 @@ import (
 )
 
 const (
-	MaxRunRecordBytes     = 64 << 10
-	MaxArtifactReferences = 128
-	MaxRunPageSize        = 100
-	DefaultRunPageSize    = 50
-	MaxInputBytes         = MaxDocumentBytes
+	MaxRunRecordBytes      = 64 << 10
+	MaxArtifactReferences  = 128
+	MaxRunPageSize         = 100
+	DefaultRunPageSize     = 50
+	MaxInputBytes          = MaxDocumentBytes
+	ArtifactInputBootstrap = "bootstrap"
+	ArtifactInputParent    = "parent"
 )
 
 var (
@@ -87,24 +89,32 @@ type ArtifactReference struct {
 // Run is the bounded durable metadata for one session-owned workflow execution.
 // Revision is the storage.KV CAS token and is not encoded into the value.
 type Run struct {
-	SessionID          uuid.UUID           `json:"session_id"`
-	ToolExecutionID    uuid.UUID           `json:"tool_execution_id"`
-	DefinitionName     string              `json:"definition_name"`
-	DefinitionVersion  string              `json:"definition_version"`
-	ID                 uuid.UUID           `json:"id"`
-	GraphRunID         flow.GraphRunID     `json:"graph_run_id"`
-	ParentRunID        uuid.UUID           `json:"parent_run_id,omitzero"`
-	Input              InputReference      `json:"input"`
-	Status             RunStatus           `json:"status"`
-	StatusSummary      string              `json:"status_summary,omitempty"`
-	CancelRequested    bool                `json:"cancel_requested,omitempty"`
-	CheckpointRevision uint64              `json:"checkpoint_revision"`
-	ActivityCursor     uint64              `json:"activity_cursor"`
-	LedgerLocator      string              `json:"ledger_locator"`
-	Artifacts          []ArtifactReference `json:"artifacts,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	UpdatedAt          time.Time           `json:"updated_at"`
-	Revision           uint64              `json:"-"`
+	SessionID         uuid.UUID       `json:"session_id"`
+	ToolExecutionID   uuid.UUID       `json:"tool_execution_id"`
+	DefinitionName    string          `json:"definition_name"`
+	DefinitionVersion string          `json:"definition_version"`
+	ID                uuid.UUID       `json:"id"`
+	GraphRunID        flow.GraphRunID `json:"graph_run_id"`
+	ParentRunID       uuid.UUID       `json:"parent_run_id,omitzero"`
+	// ArtifactSessionID/ArtifactRunID identify the private namespace owned by
+	// this workflow execution. They are deliberately separate from SessionID
+	// and ID, which identify the Harness/workflow record.
+	ArtifactSessionID      uuid.UUID           `json:"artifact_session_id"`
+	ArtifactRunID          uuid.UUID           `json:"artifact_run_id"`
+	ArtifactInputKind      string              `json:"artifact_input_kind,omitempty"`
+	ArtifactInputSessionID uuid.UUID           `json:"artifact_input_session_id,omitzero"`
+	ArtifactInputRunID     uuid.UUID           `json:"artifact_input_run_id,omitzero"`
+	Input                  InputReference      `json:"input"`
+	Status                 RunStatus           `json:"status"`
+	StatusSummary          string              `json:"status_summary,omitempty"`
+	CancelRequested        bool                `json:"cancel_requested,omitempty"`
+	CheckpointRevision     uint64              `json:"checkpoint_revision"`
+	ActivityCursor         uint64              `json:"activity_cursor"`
+	LedgerLocator          string              `json:"ledger_locator"`
+	Artifacts              []ArtifactReference `json:"artifacts,omitempty"`
+	CreatedAt              time.Time           `json:"created_at"`
+	UpdatedAt              time.Time           `json:"updated_at"`
+	Revision               uint64              `json:"-"`
 }
 
 func cloneRun(run Run) Run {
@@ -124,6 +134,24 @@ func validateRun(run Run) error {
 	}
 	if uuid.UUID(run.GraphRunID).IsZero() {
 		return errors.New("flow graph run ID is required")
+	}
+	if run.ArtifactSessionID.IsZero() {
+		return errors.New("artifact session ID is required")
+	}
+	if run.ArtifactRunID.IsZero() {
+		return errors.New("artifact run ID is required")
+	}
+	if run.ArtifactInputKind == "" {
+		if !run.ArtifactInputSessionID.IsZero() || !run.ArtifactInputRunID.IsZero() {
+			return errors.New("artifact input namespace is incomplete")
+		}
+	} else {
+		if run.ArtifactInputKind != ArtifactInputBootstrap && run.ArtifactInputKind != ArtifactInputParent {
+			return fmt.Errorf("invalid artifact input kind %q", run.ArtifactInputKind)
+		}
+		if run.ArtifactInputSessionID.IsZero() || run.ArtifactInputRunID.IsZero() {
+			return errors.New("artifact input namespace is incomplete")
+		}
 	}
 	if err := validateComponent("definition name", run.DefinitionName); err != nil {
 		return err
@@ -211,6 +239,11 @@ func immutableIdentityEqual(current, next Run) bool {
 		current.ID == next.ID &&
 		current.GraphRunID == next.GraphRunID &&
 		current.ParentRunID == next.ParentRunID &&
+		current.ArtifactSessionID == next.ArtifactSessionID &&
+		current.ArtifactRunID == next.ArtifactRunID &&
+		current.ArtifactInputKind == next.ArtifactInputKind &&
+		current.ArtifactInputSessionID == next.ArtifactInputSessionID &&
+		current.ArtifactInputRunID == next.ArtifactInputRunID &&
 		current.Input == next.Input &&
 		current.LedgerLocator == next.LedgerLocator &&
 		current.CreatedAt.Equal(next.CreatedAt)

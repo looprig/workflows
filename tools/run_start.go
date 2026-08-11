@@ -69,7 +69,21 @@ func (t *runStartTool) InvokableRun(ctx context.Context, raw string) (*tool.Tool
 	now := t.now().UTC()
 	run := workflows.Run{SessionID: t.sessionID, ToolExecutionID: executionID, DefinitionName: args.DefinitionName, DefinitionVersion: args.DefinitionVersion,
 		ID: runID, GraphRunID: flow.GraphRunID(graphUUID), ParentRunID: parent, Input: inputRef, Status: workflows.RunPending,
+		ArtifactSessionID: t.sessionID, ArtifactRunID: runID,
 		LedgerLocator: "flow/runs/" + graphUUID.String(), CreatedAt: now, UpdatedAt: now}
+	if t.prepareRun != nil {
+		before := run
+		before.Artifacts = append([]workflows.ArtifactReference(nil), run.Artifacts...)
+		run.Artifacts = append([]workflows.ArtifactReference(nil), run.Artifacts...)
+		prepared, prepareErr := t.prepareRun(ctx, run)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		if integrityErr := validatePreparedRun(before, prepared); integrityErr != nil {
+			return nil, integrityErr
+		}
+		run = prepared
+	}
 	created, err := t.registry.Create(ctx, run)
 	if err != nil {
 		return nil, err

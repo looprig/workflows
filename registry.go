@@ -30,6 +30,13 @@ func (r *RunRegistry) Create(ctx context.Context, run Run) (*Run, error) {
 	if run.Revision != 0 {
 		return nil, errors.New("workflows: new run revision must be zero")
 	}
+	// Generic callers that do not need a cross-run input contract still get a
+	// private child namespace. Policy composition supplies an explicit
+	// artifact session and input relationship through the start preparer.
+	if run.ArtifactSessionID.IsZero() && run.ArtifactRunID.IsZero() && run.ArtifactInputKind == "" && run.ArtifactInputSessionID.IsZero() && run.ArtifactInputRunID.IsZero() {
+		run.ArtifactSessionID = run.SessionID
+		run.ArtifactRunID = run.ID
+	}
 	key, err := runKey(run.SessionID, run.ID)
 	if err != nil {
 		return nil, err

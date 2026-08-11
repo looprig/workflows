@@ -34,6 +34,8 @@ func testRun(sessionID, runID uuid.UUID) Run {
 		ID:                runID,
 		GraphRunID:        testGraphRunID(31),
 		ParentRunID:       testUUID(41),
+		ArtifactSessionID: sessionID,
+		ArtifactRunID:     runID,
 		Input: InputReference{
 			Digest: strings.Repeat("a", 64),
 			Key:    "sessions/" + sessionID.String() + "/workflows/inputs/sha256/" + strings.Repeat("a", 64),
@@ -435,5 +437,60 @@ func TestRunRegistryCodecRoundTripIsJSON(t *testing.T) {
 	}
 	if !json.Valid(raw) {
 		t.Fatalf("encoded record is not JSON: %q", raw)
+	}
+}
+
+func TestRunRegistryPersistsArtifactNamespaceAndRejectsImmutableMutation(t *testing.T) {
+	ctx := context.Background()
+	backend := memstore.New()
+	registry, err := NewRunRegistry(backend.KV)
+	if err != nil {
+		t.Fatalf("NewRunRegistry: %v", err)
+	}
+	run := testRun(testUUID(25), testUUID(26))
+	run.ArtifactSessionID = testUUID(27)
+	run.ArtifactRunID = run.ID
+	run.ArtifactInputKind = ArtifactInputBootstrap
+	run.ArtifactInputSessionID = run.ArtifactSessionID
+	run.ArtifactInputRunID = testUUID(28)
+	created, err := registry.Create(ctx, run)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := registry.Get(ctx, run.SessionID, run.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ArtifactSessionID != run.ArtifactSessionID || got.ArtifactRunID != run.ArtifactRunID || got.ArtifactInputKind != run.ArtifactInputKind || got.ArtifactInputRunID != run.ArtifactInputRunID {
+		t.Fatalf("artifact descriptor changed across persistence: %#v", got)
+	}
+	next := *created
+	next.ArtifactRunID = testUUID(29)
+	next.UpdatedAt = next.UpdatedAt.Add(time.Second)
+	if _, err := registry.CompareAndSwap(ctx, created.Revision, next); !errors.Is(err, ErrConflict) {
+		t.Fatalf("artifact namespace mutation error = %v, want conflict", err)
+	}
+}
+
+func TestRunRegistryRejectsLegacyRecordWithoutArtifactNamespace(t *testing.T) {
+	ctx := context.Background()
+	backend := memstore.New()
+	registry, err := NewRunRegistry(backend.KV)
+	if err != nil {
+		t.Fatalf("NewRunRegistry: %v", err)
+	}
+	sessionID, runID := testUUID(30), testUUID(31)
+	run := testRun(sessionID, runID)
+	run.ArtifactSessionID = uuid.UUID{}
+	run.ArtifactRunID = uuid.UUID{}
+	raw, err := json.Marshal(runRecordEnvelope{Version: runRecordVersion, Run: run})
+	if err != nil {
+		t.Fatalf("marshal legacy record: %v", err)
+	}
+	if _, err := backend.KV.Put(ctx, mustRunKey(sessionID, runID), 0, raw); err != nil {
+		t.Fatalf("seed legacy record: %v", err)
+	}
+	if _, err := registry.Get(ctx, sessionID, runID); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("legacy record error = %v, want corrupt record", err)
 	}
 }

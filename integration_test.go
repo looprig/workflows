@@ -135,6 +135,9 @@ func (f *bridgeFixture) bundle(t *testing.T, supervisor *workflows.Supervisor) [
 	t.Helper()
 	bundle, err := workflowtools.NewBundle(workflowtools.Config{
 		SessionID: f.session, Catalog: f.catalog, Registry: f.registry, Inputs: f.inputs, Supervisor: supervisor,
+		Now: func() time.Time {
+			return time.Date(2026, 8, 10, 16, 0, 0, 0, time.UTC)
+		},
 		NewID: func() (uuid.UUID, error) {
 			if len(f.ids) == 0 {
 				return uuid.New()

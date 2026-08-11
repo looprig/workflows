@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 
 	"github.com/looprig/core/uuid"
@@ -48,6 +49,64 @@ type Config struct {
 	Supervisor supervisorControl
 	Now        func() time.Time
 	NewID      func() (uuid.UUID, error)
+	// PrepareRun runs after the workflow and GraphRun IDs are minted but before
+	// the durable registry record is created. It is the narrow composition seam
+	// for binding product-owned immutable execution metadata without making the
+	// neutral bridge aware of application artifacts.
+	PrepareRun func(context.Context, workflows.Run) (workflows.Run, error)
+}
+
+// PrepareRunIntegrityError reports a callback attempt to change workflow
+// metadata outside the artifact namespace descriptor allowlist.
+type PrepareRunIntegrityError struct {
+	Field string
+}
+
+func (e *PrepareRunIntegrityError) Error() string {
+	if e == nil {
+		return "workflow tools: PrepareRun changed protected run metadata"
+	}
+	return fmt.Sprintf("workflow tools: PrepareRun changed protected run field %q", e.Field)
+}
+
+func validatePreparedRun(before, after workflows.Run) error {
+	protected := after
+	protected.ArtifactSessionID = before.ArtifactSessionID
+	protected.ArtifactRunID = before.ArtifactRunID
+	protected.ArtifactInputKind = before.ArtifactInputKind
+	protected.ArtifactInputSessionID = before.ArtifactInputSessionID
+	protected.ArtifactInputRunID = before.ArtifactInputRunID
+	if reflect.DeepEqual(before, protected) {
+		return nil
+	}
+	for _, field := range []struct {
+		name  string
+		equal func() bool
+	}{
+		{name: "session_id", equal: func() bool { return before.SessionID == after.SessionID }},
+		{name: "tool_execution_id", equal: func() bool { return before.ToolExecutionID == after.ToolExecutionID }},
+		{name: "definition_name", equal: func() bool { return before.DefinitionName == after.DefinitionName }},
+		{name: "definition_version", equal: func() bool { return before.DefinitionVersion == after.DefinitionVersion }},
+		{name: "id", equal: func() bool { return before.ID == after.ID }},
+		{name: "graph_run_id", equal: func() bool { return before.GraphRunID == after.GraphRunID }},
+		{name: "parent_run_id", equal: func() bool { return before.ParentRunID == after.ParentRunID }},
+		{name: "input", equal: func() bool { return reflect.DeepEqual(before.Input, after.Input) }},
+		{name: "status", equal: func() bool { return before.Status == after.Status }},
+		{name: "status_summary", equal: func() bool { return before.StatusSummary == after.StatusSummary }},
+		{name: "cancel_requested", equal: func() bool { return before.CancelRequested == after.CancelRequested }},
+		{name: "checkpoint_revision", equal: func() bool { return before.CheckpointRevision == after.CheckpointRevision }},
+		{name: "activity_cursor", equal: func() bool { return before.ActivityCursor == after.ActivityCursor }},
+		{name: "ledger_locator", equal: func() bool { return before.LedgerLocator == after.LedgerLocator }},
+		{name: "artifacts", equal: func() bool { return reflect.DeepEqual(before.Artifacts, after.Artifacts) }},
+		{name: "created_at", equal: func() bool { return reflect.DeepEqual(before.CreatedAt, after.CreatedAt) }},
+		{name: "updated_at", equal: func() bool { return reflect.DeepEqual(before.UpdatedAt, after.UpdatedAt) }},
+		{name: "revision", equal: func() bool { return before.Revision == after.Revision }},
+	} {
+		if !field.equal() {
+			return &PrepareRunIntegrityError{Field: field.name}
+		}
+	}
+	return &PrepareRunIntegrityError{Field: "run_metadata"}
 }
 
 type boundRuntime struct {
@@ -58,6 +117,7 @@ type boundRuntime struct {
 	supervisor supervisorControl
 	now        func() time.Time
 	newID      func() (uuid.UUID, error)
+	prepareRun func(context.Context, workflows.Run) (workflows.Run, error)
 }
 
 func NewBundle(config Config) ([]tool.InvokableTool, error) {
@@ -78,7 +138,7 @@ func NewBundle(config Config) ([]tool.InvokableTool, error) {
 	if newID == nil {
 		newID = uuid.New
 	}
-	runtime := &boundRuntime{sessionID: config.SessionID, catalog: config.Catalog, registry: config.Registry, inputs: config.Inputs, supervisor: config.Supervisor, now: now, newID: newID}
+	runtime := &boundRuntime{sessionID: config.SessionID, catalog: config.Catalog, registry: config.Registry, inputs: config.Inputs, supervisor: config.Supervisor, now: now, newID: newID, prepareRun: config.PrepareRun}
 	return newToolSet(runtime), nil
 }
 

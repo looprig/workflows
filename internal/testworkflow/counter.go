@@ -33,11 +33,25 @@ func NewDefinition(store flow.CheckpointStore) (*bridge.TypedDefinition[CounterS
 // before each vertex. It lets the integration test prove that workflow_start
 // returns after the durable seed rather than after graph completion.
 func NewDefinitionWithGate(store flow.CheckpointStore, gate <-chan struct{}) (*bridge.TypedDefinition[CounterState], error) {
+	return NewDefinitionWithGateAndSignal(store, gate, nil)
+}
+
+// NewDefinitionWithGateAndSignal is the integration-test variant that signals
+// once a live vertex has entered the optional gate. The signal is bounded to
+// one non-blocking send so a test cannot make workflow execution depend on its
+// own observer.
+func NewDefinitionWithGateAndSignal(store flow.CheckpointStore, gate <-chan struct{}, entered chan<- struct{}) (*bridge.TypedDefinition[CounterState], error) {
 	if store == nil {
 		return nil, &bridge.InvalidSchemaError{Field: "checkpoint store", Err: errors.New("store is required")}
 	}
 	graph := flow.NewGraph[CounterState](counterGraph)
 	task := flow.NewFuncTask(func(ctx context.Context, _ int) (int, error) {
+		if entered != nil {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+		}
 		if gate != nil {
 			select {
 			case <-gate:

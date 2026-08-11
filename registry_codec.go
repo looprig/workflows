@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const runRecordVersion = 1
+const runRecordVersion = 2
 
 type runRecordEnvelope struct {
 	Version int `json:"version"`

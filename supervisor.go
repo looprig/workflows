@@ -110,6 +110,16 @@ func NewSupervisor(config SupervisorConfig) (*Supervisor, error) {
 	return &Supervisor{sessionID: config.SessionID, catalog: config.Catalog, registry: config.Registry, inputs: config.Inputs, leaser: config.Leaser, now: now, timeout: timeout, workers: make(chan struct{}, workers), runs: make(map[uuid.UUID]*runController)}, nil
 }
 
+// SessionID returns the immutable Harness session owner for this supervisor.
+// The value is exposed for process-resource composition to reject a resource
+// accidentally created for a different session before it reaches a tool.
+func (s *Supervisor) SessionID() uuid.UUID {
+	if s == nil {
+		return uuid.UUID{}
+	}
+	return s.sessionID
+}
+
 func (s *Supervisor) Activate(ctx context.Context, services tool.SessionResourceServices) error {
 	if err := services.Validate(); err != nil {
 		return err

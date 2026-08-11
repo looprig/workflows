@@ -70,7 +70,7 @@ func TestDefinitionsBuildDirectSessionBoundBundle(t *testing.T) {
 type controlWithoutStart struct{}
 
 func (controlWithoutStart) Resume(context.Context, uuid.UUID, json.RawMessage) error { return nil }
-func (controlWithoutStart) Cancel(context.Context, uuid.UUID, string) error         { return nil }
+func (controlWithoutStart) Cancel(context.Context, uuid.UUID, string) error          { return nil }
 
 func TestNewBundleRejectsSupervisorWithoutSessionOwnedStarter(t *testing.T) {
 	_, err := NewBundle(Config{
