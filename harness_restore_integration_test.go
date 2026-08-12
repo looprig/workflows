@@ -20,7 +20,6 @@ import (
 	"github.com/looprig/flow/pkg/flow"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/gate"
-	"github.com/looprig/harness/pkg/hook"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
@@ -141,11 +140,11 @@ type harnessWorkflowFixture struct {
 }
 
 type harnessWorkflowFixtureOptions struct {
-	hooks              hook.Set
 	definitionName     string
 	buildDefinition    func(flow.CheckpointStore) (workflows.Definition, error)
 	wrapWorkflowKV     func(storage.KV) storage.KV
 	wrapWorkflowLeaser func(storage.Leaser) storage.Leaser
+	wrapSessionLedger  func(storage.Ledger) storage.Ledger
 }
 
 func newHarnessWorkflowBackend(t *testing.T, name string) *storage.Composite {
@@ -276,7 +275,11 @@ func newHarnessWorkflowFixtureWithOptions(t *testing.T, options harnessWorkflowF
 		t.Fatalf("loop.Define: %v", err)
 	}
 
-	store, err := sessionstore.Open(newHarnessWorkflowBackend(t, "session"))
+	sessionBackend := newHarnessWorkflowBackend(t, "session")
+	if options.wrapSessionLedger != nil {
+		sessionBackend.Ledger = options.wrapSessionLedger(sessionBackend.Ledger)
+	}
+	store, err := sessionstore.Open(sessionBackend)
 	if err != nil {
 		t.Fatalf("sessionstore.Open: %v", err)
 	}
@@ -285,7 +288,6 @@ func newHarnessWorkflowFixtureWithOptions(t *testing.T, options harnessWorkflowF
 		rig.WithPrimers("workflow_harness"),
 		rig.WithSessionStore(store),
 		rig.WithSessionResourceStorage(harnessWorkflowResourceStorage{root: t.TempDir()}),
-		rig.WithHooks(options.hooks),
 	)
 	if err != nil {
 		t.Fatalf("rig.Define: %v", err)
@@ -526,6 +528,34 @@ func workflowActivityKinds(activities []event.WorkflowActivity) []string {
 
 var errHarnessWorkflowActivityCrash = errors.New("test: harness workflow activity durable append crash")
 
+func TestHarnessWorkflowActivityLedgerFrameClassifier(t *testing.T) {
+	frame, err := json.Marshal(struct {
+		V    int    `json:"v"`
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+		Body []byte `json:"body"`
+	}{V: 1, Kind: "event", ID: "activity-1", Body: []byte(`{"type":"WorkflowActivity"}`)})
+	if err != nil {
+		t.Fatalf("json.Marshal frame: %v", err)
+	}
+	if got, ok := workflowActivityFrameRecordID(frame); !ok || got != "activity-1" {
+		t.Fatalf("workflowActivityFrameRecordID() = %q, %t; want activity-1, true", got, ok)
+	}
+
+	nonActivity, err := json.Marshal(struct {
+		V    int    `json:"v"`
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+		Body []byte `json:"body"`
+	}{V: 1, Kind: "event", ID: "event-1", Body: []byte(`{"type":"TurnDone"}`)})
+	if err != nil {
+		t.Fatalf("json.Marshal non-activity frame: %v", err)
+	}
+	if got, ok := workflowActivityFrameRecordID(nonActivity); ok || got != "" {
+		t.Fatalf("workflowActivityFrameRecordID(non-activity) = %q, %t; want empty, false", got, ok)
+	}
+}
+
 // harnessWorkflowActivityFaultInjector is deliberately limited to the tagged
 // Harness integration binary. It identifies the sealed WorkflowActivity event
 // at the journal boundary, injects once for one stable activity ID, and keeps
@@ -534,7 +564,7 @@ var errHarnessWorkflowActivityCrash = errors.New("test: harness workflow activit
 // a process-local append ordinal.
 type harnessWorkflowActivityFaultInjector struct {
 	target int
-	phase  hook.JournalAppendFaultPhase
+	phase  harnessJournalAppendFaultPhase
 
 	mu       sync.Mutex
 	seen     map[string]int
@@ -542,16 +572,48 @@ type harnessWorkflowActivityFaultInjector struct {
 	injected bool
 }
 
-func (i *harnessWorkflowActivityFaultInjector) begin(ctx context.Context, call hook.Call) (context.Context, hook.FinishFunc) {
-	if call.JournalAppend == nil || call.JournalAppend.Family != hook.RecordEvent || call.JournalAppend.EventType != "WorkflowActivity" {
-		return ctx, nil
+type harnessJournalAppendFaultPhase uint8
+
+const (
+	harnessJournalAppendFaultBefore harnessJournalAppendFaultPhase = iota + 1
+	harnessJournalAppendFaultAfter
+)
+
+type harnessWorkflowActivityFaultLedger struct {
+	inner    storage.Ledger
+	injector *harnessWorkflowActivityFaultInjector
+}
+
+func workflowActivityFrameRecordID(frame []byte) (string, bool) {
+	var envelope struct {
+		V    int    `json:"v"`
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+		Body []byte `json:"body"`
+	}
+	if err := json.Unmarshal(frame, &envelope); err != nil || envelope.V != 1 || envelope.Kind != "event" || envelope.ID == "" {
+		return "", false
+	}
+	var eventEnvelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(envelope.Body, &eventEnvelope); err != nil || eventEnvelope.Type != "WorkflowActivity" {
+		return "", false
+	}
+	return envelope.ID, true
+}
+
+func (l *harnessWorkflowActivityFaultLedger) Append(ctx context.Context, name string, expected uint64, payload []byte) error {
+	recordID, ok := workflowActivityFrameRecordID(payload)
+	if !ok {
+		return l.inner.Append(ctx, name, expected, payload)
 	}
 
+	i := l.injector
 	i.mu.Lock()
 	if i.seen == nil {
 		i.seen = make(map[string]int)
 	}
-	recordID := call.JournalAppend.RecordID
 	ordinal, alreadySeen := i.seen[recordID]
 	if !alreadySeen {
 		ordinal = len(i.seen)
@@ -564,20 +626,30 @@ func (i *harnessWorkflowActivityFaultInjector) begin(ctx context.Context, call h
 	}
 	i.mu.Unlock()
 
-	if !shouldInject {
-		return ctx, nil
+	if !shouldInject || i.phase == harnessJournalAppendFaultAfter {
+		appendErr := l.inner.Append(ctx, name, expected, payload)
+		if shouldInject && appendErr == nil {
+			return errHarnessWorkflowActivityCrash
+		}
+		return appendErr
 	}
-	return hook.WithJournalAppendFault(ctx, hook.JournalAppendFault{
-		Phase: i.phase,
-		Err:   errHarnessWorkflowActivityCrash,
-	}), nil
+	return errHarnessWorkflowActivityCrash
 }
 
-func (i *harnessWorkflowActivityFaultInjector) hooked() hook.Set {
-	return hook.Set{Around: []hook.Around{{
-		Operation: hook.OperationJournalAppend,
-		Begin:     i.begin,
-	}}}
+func (i *harnessWorkflowActivityFaultInjector) wrapLedger(inner storage.Ledger) storage.Ledger {
+	return &harnessWorkflowActivityFaultLedger{inner: inner, injector: i}
+}
+
+func (l *harnessWorkflowActivityFaultLedger) Read(ctx context.Context, name string, from uint64) (storage.Cursor, error) {
+	return l.inner.Read(ctx, name, from)
+}
+
+func (l *harnessWorkflowActivityFaultLedger) Tip(ctx context.Context, name string) (uint64, error) {
+	return l.inner.Tip(ctx, name)
+}
+
+func (l *harnessWorkflowActivityFaultLedger) Delete(ctx context.Context, name string) error {
+	return l.inner.Delete(ctx, name)
 }
 
 func (i *harnessWorkflowActivityFaultInjector) snapshot() (observed int, injected bool) {
@@ -623,16 +695,16 @@ func waitHarnessWorkflowSupervisorError(t *testing.T, ctx context.Context, fixtu
 func TestHarnessWorkflowActivityBeforeAfterDurableAppendRecoveryMatrix(t *testing.T) {
 	for _, phase := range []struct {
 		name  string
-		value hook.JournalAppendFaultPhase
+		value harnessJournalAppendFaultPhase
 	}{
-		{name: "before durable append", value: hook.JournalAppendFaultBefore},
-		{name: "after durable append", value: hook.JournalAppendFaultAfter},
+		{name: "before durable append", value: harnessJournalAppendFaultBefore},
+		{name: "after durable append", value: harnessJournalAppendFaultAfter},
 	} {
 		for target := 0; target < 4; target++ {
 			phase, target := phase, target
 			t.Run(fmt.Sprintf("%s/activity_%d", phase.name, target), func(t *testing.T) {
 				injector := &harnessWorkflowActivityFaultInjector{target: target, phase: phase.value}
-				fixture := newHarnessWorkflowFixtureWithOptions(t, harnessWorkflowFixtureOptions{hooks: injector.hooked()})
+				fixture := newHarnessWorkflowFixtureWithOptions(t, harnessWorkflowFixtureOptions{wrapSessionLedger: injector.wrapLedger})
 				ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 				defer cancel()
 
@@ -796,7 +868,7 @@ func TestHarnessWorkflowActivityCursorCASConflictRecoversFromLivePublisher(t *te
 	observer := &harnessWorkflowActivityFaultInjector{target: -1}
 	conflicts := &harnessWorkflowCursorConflictKV{}
 	fixture := newHarnessWorkflowFixtureWithOptions(t, harnessWorkflowFixtureOptions{
-		hooks: observer.hooked(),
+		wrapSessionLedger: observer.wrapLedger,
 		wrapWorkflowKV: func(inner storage.KV) storage.KV {
 			conflicts.inner = inner
 			return conflicts
@@ -940,7 +1012,7 @@ func TestHarnessSupervisorLeaseLossStopsLiveWorkflowOwner(t *testing.T) {
 	leaseController := &harnessWorkflowLeaseController{}
 	observer := &harnessWorkflowActivityFaultInjector{target: -1}
 	fixture := newHarnessWorkflowFixtureWithOptions(t, harnessWorkflowFixtureOptions{
-		hooks: observer.hooked(),
+		wrapSessionLedger: observer.wrapLedger,
 		buildDefinition: func(store flow.CheckpointStore) (workflows.Definition, error) {
 			return testworkflow.NewDefinitionWithGateAndSignal(store, gate, entered)
 		},
@@ -1037,8 +1109,8 @@ func TestHarnessSupervisorCancellationConflictExhaustionUsesLivePublisher(t *tes
 	}
 	observer := &harnessWorkflowActivityFaultInjector{target: -1}
 	fixture := newHarnessWorkflowFixtureWithOptions(t, harnessWorkflowFixtureOptions{
-		hooks:          observer.hooked(),
-		definitionName: "cancel_conflict_flow",
+		wrapSessionLedger: observer.wrapLedger,
+		definitionName:    "cancel_conflict_flow",
 		buildDefinition: func(flow.CheckpointStore) (workflows.Definition, error) {
 			return definition, nil
 		},
