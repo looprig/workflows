@@ -13,13 +13,13 @@ jobs:
     env:
       GOCACHE: /tmp/looprig-workflows-docs-gocache
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
       - name: Hydrate the pinned module cache
-        run: GOWORK=off go mod download
+        run: GOWORK=off go mod download all
       - name: Run stage 18
         run: GOWORK=off GOCACHE=/tmp/looprig-workflows-docs-gocache go run ./examples/docs/stage18_workflows
       - name: Workflows standalone checks (partial)
