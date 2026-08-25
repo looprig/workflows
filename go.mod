@@ -9,11 +9,11 @@ tool (
 )
 
 require (
-	github.com/looprig/core v0.6.0
-	github.com/looprig/flow v0.4.0
-	github.com/looprig/harness v0.26.0
-	github.com/looprig/inference v0.11.0
-	github.com/looprig/storage v0.4.0
+	github.com/looprig/core v0.6.1
+	github.com/looprig/flow v0.4.1
+	github.com/looprig/harness v0.29.0
+	github.com/looprig/inference v0.12.1
+	github.com/looprig/storage v0.4.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 )
 
