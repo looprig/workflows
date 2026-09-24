@@ -1,15 +1,52 @@
 # Workflows
 
-`github.com/looprig/workflows` is an independent Go module for the
-storage-neutral Flow-to-Harness workflow bridge. Durable storage and concrete
-transport adapters are supplied by callers; this module does not select a
-backend.
+`github.com/looprig/workflows` is the storage-neutral bridge between the
+[Flow](https://github.com/looprig/flow) workflow engine and a Harness session.
+It lets an agent session start, observe, resume and cancel typed Flow workflow
+runs through a small set of tools, with durable run metadata kept in
+caller-supplied storage. Durable storage and concrete transport adapters are
+supplied by callers; this module does not select a backend.
+
+## Status
+
+Released. The root package provides the definition catalog
+(`Catalog`, `TypedDefinition[S]`, strict JSON-Schema input/resume validation),
+the durable run registry (`RunRegistry`, over `storage.KV`), the input store
+(`InputStore`, over `storage.Blobs`), and the session-owned `Supervisor`
+(checkpoint coordination, restart adoption and activity reconciliation, a
+`storage.Leaser` lease, and bounded activity history). The `tools` package
+exposes the bridge to a Harness agent as tools.
+
+Known limits:
+
+- There is no production workflow in this module. `internal/testworkflow` and
+  the bridge integration tests are test fixtures that exercise the composition
+  with memory providers.
+- `SupervisorResourceName` is `"policy53-workflow-supervisor"`, a name inherited
+  from Policy53, the first consumer.
+
+## Install
+
+```sh
+go get github.com/looprig/workflows@latest
+```
+
+## Packages
+
+| Package | Purpose |
+|---|---|
+| `github.com/looprig/workflows` | Catalog, typed definitions, run registry, input store, supervisor and their typed errors. |
+| `github.com/looprig/workflows/tools` | `tools.NewBundle` returns the Harness tools `workflow_definition_list`, `workflow_run_start`, `workflow_run_get`, `workflow_run_list`, `workflow_run_history`, `workflow_run_resume` and `workflow_run_cancel`, scoped to one session. |
+| `examples/docs/stage18_workflows` | Runnable documentation example: a typed definition registered in a catalog. |
+| `internal/testworkflow` | Test-only workflow fixture. |
+
+## Usage
 
 The bridge is storage-neutral. Callers provide the checkpoint adapter and
 session-owned services at composition time:
 
 ```go
-checkpoints := flowstore.New(ledger) // storage.Ledger -> flow.CheckpointStore
+checkpoints := flowstore.New(ledger) // github.com/looprig/flow/store: storage.Ledger -> flow.CheckpointStore
 registry, _ := workflows.NewRunRegistry(kv)
 inputs, _ := workflows.NewInputStore(blobs)
 supervisor, _ := workflows.NewSupervisor(workflows.SupervisorConfig{
@@ -18,23 +55,45 @@ supervisor, _ := workflows.NewSupervisor(workflows.SupervisorConfig{
 })
 ```
 
+`checkpoints` is what each `workflows.NewTypedDefinition` is built over, and
+`catalog` is a `workflows.NewCatalog()` with those definitions registered.
+
 The supervisor owns only bounded run metadata, checkpoint coordination, and
 metadata-only workflow activities. Application artifacts, policy text, model
 prompts/output, and report bytes remain in caller-owned stores. Register the
-supervisor as the Harness session resource so session shutdown cancels its
-goroutines and releases its lease.
+supervisor as the Harness session resource (it implements
+`tool.SessionResource`) so session shutdown cancels its goroutines and releases
+its lease.
 
-The `internal/testworkflow` package and bridge integration tests exercise the
-composition with memory providers, including restart/adoption and activity
-reconciliation recovery. They are test fixtures, not a production workflow.
+## Where it sits
+
+Tier 5 of the Looprig workspace. Production dependencies: `core`, `flow`,
+`harness` and `storage`. `inference` and `sessionstore` are test-only (the
+`harness_integration` fault injector decodes SessionStore's envelope).
+
+## Development
+
+The Go baseline is 1.26.8. Standalone tests:
+
+```sh
+GOWORK=off go test ./...
+GOWORK=off go test -tags harness_integration -run '^TestHarness' ./...   # Harness composition proofs
+```
+
+Make targets run with `GOWORK=off GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
+GOFLAGS=-mod=readonly`, so the pinned module graph must already be in the
+local module cache (`GOWORK=off go mod download`). Useful targets: `test`,
+`race`, `integration`, `recovery`, `harness-integration`,
+`harness-integration-race`, `standalone-check`, `check`, and
+`release-checkpoint`, described below.
 
 ## Local release provenance
 
-The direct local replacements in `go.mod` are development inputs, but they
-are still part of the exact source set used by a standalone Workflows
-checkpoint. The repository provenance helper discovers those replacements
-without resolving the network and records one evidence record for Workflows
-and each replacement.
+Any direct local replacement in `go.mod` would be part of the exact source set
+used by a standalone Workflows checkpoint. The published `go.mod` has none, but
+the repository provenance helper discovers replacements without resolving the
+network and records one evidence record for Workflows and for each replacement
+it finds.
 
 Each record binds the canonical module path and `go.mod` SHA-256 to its Git
 root, `HEAD` commit, repository tree, module-subdirectory tree, clean state,
@@ -70,9 +129,9 @@ POLICY53_GOVULNDB=/absolute/path/to/vulndb-v1 make check
 The database must contain the local `index/modules.json` (or its gzipped
 form). Network database URLs are rejected. The tagged
 `harness-integration` and `harness-integration-race` composition proofs are
-required prerequisites of `provenance` and `release-checkpoint`; they
-intentionally use the sibling workspace to supply the test-only inference
-dependency, while still disabling proxy and checksum resolution. Their
+required prerequisites of `provenance` and `release-checkpoint`; like every
+other target they run with `GOWORK=off` and proxy and checksum resolution
+disabled, resolving the test-only `inference` dependency from `go.mod`. Their
 successful results are recorded in `provenance.json` as the required full
 Harness integration evidence: the selector covers every tagged
 `TestHarness...` restore, publisher, cursor-CAS, lease-loss, and fault test.
@@ -120,3 +179,8 @@ as `PASS` only after their normal and race tests have completed successfully.
 The ordinary `harness-integration` target remains available for the bounded
 non-race run; both tagged targets select `^TestHarness` and retain their
 90-second and 180-second timeouts.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE). Third-party notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
