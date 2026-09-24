@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/looprig/core/content"
+	sessionwire "github.com/looprig/core/sessionwire/v1"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/flow/pkg/flow"
 	"github.com/looprig/harness/pkg/event"
@@ -29,6 +30,7 @@ import (
 	"github.com/looprig/inference"
 	model "github.com/looprig/inference/model"
 	"github.com/looprig/inference/stream"
+	durablestore "github.com/looprig/sessionstore"
 	"github.com/looprig/storage"
 	"github.com/looprig/storage/memstore"
 	"github.com/looprig/workflows"
@@ -529,30 +531,40 @@ func workflowActivityKinds(activities []event.WorkflowActivity) []string {
 var errHarnessWorkflowActivityCrash = errors.New("test: harness workflow activity durable append crash")
 
 func TestHarnessWorkflowActivityLedgerFrameClassifier(t *testing.T) {
-	frame, err := json.Marshal(struct {
-		V    int    `json:"v"`
-		Kind string `json:"kind"`
-		ID   string `json:"id"`
-		Body []byte `json:"body"`
-	}{V: 1, Kind: "event", ID: "activity-1", Body: []byte(`{"type":"WorkflowActivity"}`)})
-	if err != nil {
-		t.Fatalf("json.Marshal frame: %v", err)
+	publicEventFrame := func(t *testing.T, eventID string, runtimeBody []byte) []byte {
+		t.Helper()
+		frame, err := durablestore.EncodeEnvelope(durablestore.Envelope{
+			Kind:    durablestore.EnvelopeKindPublicEvent,
+			EventID: sessionwire.EventID(eventID),
+			Public:  durablestore.BodySlot{Inline: []byte(`{"type":"public"}`)},
+			Runtime: durablestore.BodySlot{Inline: runtimeBody},
+		})
+		if err != nil {
+			t.Fatalf("durablestore.EncodeEnvelope(%s): %v", eventID, err)
+		}
+		return frame
 	}
+
+	frame := publicEventFrame(t, "activity-1", []byte(`{"type":"WorkflowActivity","v":1}`))
 	if got, ok := workflowActivityFrameRecordID(frame); !ok || got != "activity-1" {
 		t.Fatalf("workflowActivityFrameRecordID() = %q, %t; want activity-1, true", got, ok)
 	}
 
-	nonActivity, err := json.Marshal(struct {
-		V    int    `json:"v"`
-		Kind string `json:"kind"`
-		ID   string `json:"id"`
-		Body []byte `json:"body"`
-	}{V: 1, Kind: "event", ID: "event-1", Body: []byte(`{"type":"TurnDone"}`)})
-	if err != nil {
-		t.Fatalf("json.Marshal non-activity frame: %v", err)
-	}
+	nonActivity := publicEventFrame(t, "event-1", []byte(`{"type":"TurnDone","v":1}`))
 	if got, ok := workflowActivityFrameRecordID(nonActivity); ok || got != "" {
 		t.Fatalf("workflowActivityFrameRecordID(non-activity) = %q, %t; want empty, false", got, ok)
+	}
+
+	runtimeControl, err := durablestore.EncodeEnvelope(durablestore.Envelope{
+		Kind:     durablestore.EnvelopeKindRuntimeControl,
+		RecordID: "event|activity-2",
+		Runtime:  durablestore.BodySlot{Inline: []byte(`{"type":"WorkflowActivity","v":1}`)},
+	})
+	if err != nil {
+		t.Fatalf("durablestore.EncodeEnvelope(runtime control): %v", err)
+	}
+	if got, ok := workflowActivityFrameRecordID(runtimeControl); ok || got != "" {
+		t.Fatalf("workflowActivityFrameRecordID(runtime control) = %q, %t; want empty, false", got, ok)
 	}
 }
 
@@ -584,23 +596,23 @@ type harnessWorkflowActivityFaultLedger struct {
 	injector *harnessWorkflowActivityFaultInjector
 }
 
+// workflowActivityFrameRecordID classifies one raw Harness journal frame. As of
+// harness v0.34.0 the journal writes SessionStore's own binary envelope, so the
+// frame is decoded with SessionStore's released decoder. WorkflowActivity is
+// always Public, so it is framed as a public event whose stable identity is the
+// envelope EventID and whose native Harness body sits in the runtime slot.
 func workflowActivityFrameRecordID(frame []byte) (string, bool) {
-	var envelope struct {
-		V    int    `json:"v"`
-		Kind string `json:"kind"`
-		ID   string `json:"id"`
-		Body []byte `json:"body"`
-	}
-	if err := json.Unmarshal(frame, &envelope); err != nil || envelope.V != 1 || envelope.Kind != "event" || envelope.ID == "" {
+	envelope, err := durablestore.DecodeEnvelope(frame)
+	if err != nil || envelope.Kind != durablestore.EnvelopeKindPublicEvent || envelope.EventID == "" || envelope.Runtime.Inline == nil {
 		return "", false
 	}
 	var eventEnvelope struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(envelope.Body, &eventEnvelope); err != nil || eventEnvelope.Type != "WorkflowActivity" {
+	if err := json.Unmarshal(envelope.Runtime.Inline, &eventEnvelope); err != nil || eventEnvelope.Type != "WorkflowActivity" {
 		return "", false
 	}
-	return envelope.ID, true
+	return string(envelope.EventID), true
 }
 
 func (l *harnessWorkflowActivityFaultLedger) Append(ctx context.Context, name string, expected uint64, payload []byte) error {
