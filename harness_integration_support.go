@@ -81,7 +81,7 @@ func (d *HarnessCancellationConflictDefinition) Start(ctx context.Context, input
 }
 
 func (d *HarnessCancellationConflictDefinition) Resume(context.Context, flow.GraphRunID, ValidatedResume, ...flow.RunOption) (*Result, error) {
-	return nil, errors.New("Harness cancellation conflict definition does not support resume")
+	return nil, errors.New("harness cancellation conflict definition does not support resume")
 }
 
 func (d *HarnessCancellationConflictDefinition) Get(ctx context.Context, id flow.GraphRunID) (*Result, error) {
